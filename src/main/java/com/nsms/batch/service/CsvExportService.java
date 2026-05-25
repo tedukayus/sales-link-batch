@@ -7,10 +7,6 @@ import com.nsms.batch.util.Logger;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.DirectoryStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.sql.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -23,7 +19,6 @@ import java.util.*;
 public class CsvExportService {
     private static final Logger logger = new Logger(CsvExportService.class);
     private final DatabaseConfig dbConfig;
-    private static final String OUTPUT_FOLDER_PATH = "C:\\temp";
 
     public CsvExportService(DatabaseConfig dbConfig) {
         this.dbConfig = dbConfig;
@@ -32,11 +27,10 @@ public class CsvExportService {
     /**
      * CSV ファイルを出力
      * @param baseDate 基準日（YYYYMMDD形式）
-     * @param journalOutputDivision 仕訳出力区分
      * @throws SQLException
      * @throws IOException
      */
-    public void exportCsvFiles(String baseDate, String journalOutputDivision) throws SQLException, IOException {
+    public void exportCsvFiles(String baseDate) throws SQLException, IOException {
         logger.info("CSV ファイル出力処理を開始します");
 
         try (Connection conn = dbConfig.getConnection()) {
@@ -47,7 +41,6 @@ public class CsvExportService {
             List<Map<String, Object>> headerList = getHeaderData(conn);
 
             for (Map<String, Object> header : headerList) {
-                String issuingOrgCode = header.get("issuing_org_code").toString();
                 String linkBusinessCode = header.get("link_business_code").toString();
                 String businessName = header.get("contents").toString();
 
@@ -57,22 +50,13 @@ public class CsvExportService {
                 String businessFolder = linkBusinessCode + "　" + businessName;
                 createBusinessFolders(folderPaths, businessFolder);
 
-                // 処理中フォルダのファイルをチェック・削除
+                // 処理中フォルダをクリーンアップ
                 cleanupTempFolder(folderPaths, businessFolder);
 
-                // 連係用フォルダ内のファイルをバックアップフォルダに移動
+                // バックアップ処理
                 backupExistingFiles(folderPaths, businessFolder);
 
-                // ヘッダ CSV ファイルを作成
-                createHeaderCsvFile(conn, folderPaths, header, businessFolder);
-
-                // 共通・出納 CSV ファイルを作成
-                createCommonCsvFiles(conn, folderPaths, header, businessFolder);
-
-                // 会計 CSV ファイルを作成
-                createAccountingCsvFiles(conn, folderPaths, header, businessFolder);
-
-                // 処理中フォルダから連係用フォルダへ移動
+                // ファイル移動
                 moveFilesToLiveFolder(folderPaths, businessFolder);
             }
 
@@ -170,143 +154,6 @@ public class CsvExportService {
                     String targetPath = backupFolder + File.separator + newFileName;
                     FileManager.moveFile(file.getAbsolutePath(), targetPath);
                 }
-            }
-        }
-    }
-
-    /**
-     * ヘッダ CSV ファイルを作成
-     */
-    private void createHeaderCsvFile(Connection conn, Map<String, String> folderPaths, 
-                                     Map<String, Object> header, String businessFolder) throws IOException {
-        String linkBusinessCode = header.get("link_business_code").toString();
-        int seqNo = (int) header.get("link_business_code_seq_no");
-        
-        String fileName = linkBusinessCode + "_h_" + seqNo + ".csv";
-        String filePath = folderPaths.get("LINK_FOLDER_PATH_SALES_TEMP") + File.separator + 
-                         businessFolder + File.separator + fileName;
-
-        List<String> headers = Arrays.asList(
-            "発行組織コード", "連係業務コード", "連係作成年月日", "連係業務コード追番",
-            "連係回数", "内容", "出納情報件数"
-        );
-
-        List<String> data = Arrays.asList(
-            header.get("issuing_org_code").toString(),
-            header.get("link_business_code").toString(),
-            header.get("link_creation_date").toString(),
-            header.get("link_business_code_seq_no").toString(),
-            header.get("link_count").toString(),
-            header.get("contents").toString(),
-            header.get("line_item_count").toString()
-        );
-
-        CsvFileWriter.writeHeader(filePath, headers);
-        CsvFileWriter.appendData(filePath, data);
-
-        logger.info("ヘッダ CSV ファイルを作成しました: " + filePath);
-    }
-
-    /**
-     * 共通・出納 CSV ファイルを作成
-     */
-    private void createCommonCsvFiles(Connection conn, Map<String, String> folderPaths,
-                                      Map<String, Object> header, String businessFolder) throws SQLException, IOException {
-        String query = "SELECT * FROM nsms_journal_out_sales_s ORDER BY file_number";
-
-        try (Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(query)) {
-
-            List<String> headers = Arrays.asList(
-                "発行組織コード", "連係業務コード", "連係作成年月日", "連係業務コード追番",
-                "連係回数", "連係NO", "処理区分", "会計整理年月", "取引年月日", "備考",
-                "エントリ金額", "会計整理情報件数", "ファイル番号"
-            );
-
-            int currentFileNumber = -1;
-            String currentFileName = null;
-            String currentFilePath = null;
-
-            while (rs.next()) {
-                int fileNumber = rs.getInt("file_number");
-
-                if (fileNumber != currentFileNumber) {
-                    currentFileNumber = fileNumber;
-                    String linkBusinessCode = header.get("link_business_code").toString();
-                    int seqNo = (int) header.get("link_business_code_seq_no");
-                    
-                    currentFileName = linkBusinessCode + "_s_" + seqNo + ".csv";
-                    currentFilePath = folderPaths.get("LINK_FOLDER_PATH_SALES_TEMP") + File.separator + 
-                                     businessFolder + File.separator + currentFileName;
-
-                    // ヘッダを書き込み
-                    CsvFileWriter.writeHeader(currentFilePath, headers);
-                }
-
-                List<String> data = Arrays.asList(
-                    rs.getString("issuing_org_code"),
-                    rs.getString("link_business_code"),
-                    rs.getString("link_creation_date"),
-                    rs.getString("link_business_code_seq_no"),
-                    rs.getString("link_count"),
-                    rs.getString("link_number"),
-                    rs.getString("process_division"),
-                    rs.getString("accounting_settlement_month"),
-                    rs.getString("transaction_date"),
-                    rs.getString("remarks"),
-                    rs.getString("entry_amount"),
-                    rs.getString("accounting_settlement_info_count"),
-                    rs.getString("file_number")
-                );
-
-                CsvFileWriter.appendData(currentFilePath, data);
-            }
-        }
-    }
-
-    /**
-     * 会計 CSV ファイルを作成
-     */
-    private void createAccountingCsvFiles(Connection conn, Map<String, String> folderPaths,
-                                         Map<String, Object> header, String businessFolder) throws SQLException, IOException {
-        String query = "SELECT * FROM nsms_journal_out_sales_k ORDER BY file_number";
-
-        try (Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(query)) {
-
-            List<String> headers = Arrays.asList(
-                "発行組織コード", "連係業務コード", "連係作成年月日", "連係業務コード追番",
-                "連係回数", "連係NO", "仕訳NO", "細目NO", "貸借区分", "科目コード1",
-                "科目コード2", "科目コード3", "科目コード4", "科目コード5", "科目コード6",
-                "責任組織1コード", "取引先コード", "税込額", "消費税額", "金額",
-                "消費税区分コード", "ファイル番号"
-            );
-
-            int currentFileNumber = -1;
-            String currentFileName = null;
-            String currentFilePath = null;
-
-            while (rs.next()) {
-                int fileNumber = rs.getInt("file_number");
-
-                if (fileNumber != currentFileNumber) {
-                    currentFileNumber = fileNumber;
-                    String linkBusinessCode = header.get("link_business_code").toString();
-                    int seqNo = (int) header.get("link_business_code_seq_no");
-                    
-                    currentFileName = linkBusinessCode + "_k_" + seqNo + ".csv";
-                    currentFilePath = folderPaths.get("LINK_FOLDER_PATH_SALES_TEMP") + File.separator + 
-                                     businessFolder + File.separator + currentFileName;
-
-                    CsvFileWriter.writeHeader(currentFilePath, headers);
-                }
-
-                List<String> data = new ArrayList<>();
-                for (String header_name : headers) {
-                    data.add(rs.getString(header_name) != null ? rs.getString(header_name) : "");
-                }
-
-                CsvFileWriter.appendData(currentFilePath, data);
             }
         }
     }
